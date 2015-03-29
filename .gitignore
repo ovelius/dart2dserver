@@ -1,3 +1,16 @@
+packages
+build/
+.pub/
+.project
+*.iml
+*.ipr
+*.iws
+.idea/
+*.dart.js
+*.js_
+*.js.deps
+*.js.map
+
 # Windows image file caches
 Thumbs.db
 ehthumbs.db
