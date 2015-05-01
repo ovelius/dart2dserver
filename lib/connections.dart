@@ -38,7 +38,7 @@ class PeerConnections {
     request.response.close();
   }
    
-  void registerWebSocket(id, webSocket) {
+  void registerWebSocket(id, WebSocket webSocket) {
     Client client = _clients[id];
     client.webSocket = webSocket;
     // Listen for incoming data. We expect the data to be a JSON-encoded String.
@@ -46,18 +46,54 @@ class PeerConnections {
       .listen((json) {
         client.handleWebSocketMessage(json);
       }, onError: (error) {
-        print('Bad WebSocket request');
+        print('Bad WebSocket request ${error} ${client.id} closed');
+        client.closed = true;
+      }, onDone: () {
+        log.info("Websocket for ${client.id} closed");
+        client.closed = true;  
       });
+    // Send list of active peers.
+    Map data = {'type':'ACTIVE_IDS', 'ids':listActiveClientIdsAndPurgeOld()};
+    log.info("Sending current client datat ${data}");
+    client.send(JSON.encode(data));
+  }
+
+  List<String> listActiveClientIdsAndPurgeOld() {
+    List<String> ids = new List();
+    Map<String, Client> clients = new Map();
+    _clients.forEach((id, Client client) {
+      if (!client.invalid()) {
+        clients[id] = client;
+        ids.add(id);
+      }
+    });
+    _clients = clients;
+    return ids;
   }
 }
 
 class Client {
+  static final Duration WEB_SOCKET_GRACE_TIME = new Duration(seconds: 30);
   PeerConnections peerConnections;
+  DateTime created;
   var ip;
   var id;
   var token;
   WebSocket webSocket;
-  Client(this.peerConnections, this.ip, this.id, this.token, this.webSocket);
+  bool closed = false;
+  
+  Client(this.peerConnections, this.ip, this.id, this.token, this.webSocket) {
+    created = new DateTime.now();
+  }
+  
+  /**
+   * Client will be invalid if closed or a websocket has not been opened within WEB_SOCKET_GRACE_TIME.
+   */
+  bool invalid() {
+    DateTime now = new DateTime.now();
+    return closed || 
+        (webSocket == null && now.millisecondsSinceEpoch - created.millisecondsSinceEpoch > WEB_SOCKET_GRACE_TIME.inMilliseconds);
+  }
   
   void handleWebSocketMessage(json) {
     var type = json['type'];
@@ -80,6 +116,10 @@ class Client {
   }
   
   send(var data) {
+    if (webSocket == null) {
+      log.warning("Attempting to send to client without initalized socket ${this.id}");
+      return;
+    }
     webSocket.add(data);
   }
 }
