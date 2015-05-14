@@ -12,7 +12,6 @@ final Set<String> DO_NO_PERSIST = new Set.from(['LEAVE', 'EXPIRE']);
   
 class PeerConnections {
   Map<String, Client> _clients = {};
-  Map<String, List<String>> _outstanding = {};
   Map<dynamic, int> _ips = {};
     
   PeerConnection() {
@@ -40,6 +39,10 @@ class PeerConnections {
    
   void registerWebSocket(id, WebSocket webSocket) {
     Client client = _clients[id];
+    if (client == null || client.closed) {
+      // Client was closed for some reason.
+      webSocket.close(401, "No associated client");
+    }
     client.webSocket = webSocket;
     // Listen for incoming data. We expect the data to be a JSON-encoded String.
     webSocket.map((string)=> JSON.decode(string))
@@ -54,7 +57,7 @@ class PeerConnections {
       });
     // Send list of active peers.
     Map data = {'type':'ACTIVE_IDS', 'ids':listActiveClientIdsAndPurgeOld()};
-    log.info("Sending current client datat ${data}");
+    log.info("Sending current client data ${data}");
     client.send(JSON.encode(data));
   }
 
@@ -105,13 +108,8 @@ class Client {
     if (destination != null) {
       log.info("$id -> $dst: $data");
       destination.send(JSON.encode(json));
-      // Send LEAVE back if failing.
-    } else if (!DO_NO_PERSIST.contains(type)) {
-      // Add to outstanding.
-      if (!peerConnections._outstanding.containsKey(dst)) {
-        peerConnections._outstanding[dst] = new List();
-      }
-      peerConnections._outstanding[dst].add(data);
+    } else {
+      destination.send(JSON.encode(leaveMessage(dst)));
     }
   }
   
@@ -122,16 +120,16 @@ class Client {
     }
     webSocket.add(data);
   }
+
+  Map leaveMessage(dst) {
+    return {
+      'type': 'LEAVE',
+      'src': dst,
+      'dst': id
+    };
+  }
 }
 
-
-Map leaveMessage(src, dst) {
-  return {
-    'type': 'LEAVE',
-    'src': src,
-    'dst': dst
-  };
-}
 
 /*
   // User is connected!
