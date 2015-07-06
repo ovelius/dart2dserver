@@ -41,7 +41,7 @@ class PeerConnections {
     Client client = _clients[id];
     if (client == null || client.closed) {
       // Client was closed for some reason.
-      webSocket.close(401, "No associated client");
+      webSocket.close(1002, "No associated client");
     }
     client.webSocket = webSocket;
     // Listen for incoming data. We expect the data to be a JSON-encoded String.
@@ -109,7 +109,7 @@ class Client {
       log.info("$id -> $dst: $data");
       destination.send(JSON.encode(json));
     } else {
-      destination.send(JSON.encode(leaveMessage(dst)));
+      send(JSON.encode(leaveMessage(dst)));
     }
   }
   
