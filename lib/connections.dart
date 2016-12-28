@@ -1,8 +1,10 @@
 library connections;
 
+import 'dart:async';
 import 'peers.dart';
 import 'package:route/server.dart';
 import 'dart:io';
+import 'package:locking/locking.dart';
 import 'dart:convert';
 import 'package:logging/logging.dart';
 import 'package:logging_handlers/logging_handlers_shared.dart';
@@ -11,15 +13,16 @@ final Logger log = new Logger('Connections');
 final Set<String> DO_NO_PERSIST = new Set.from(['LEAVE', 'EXPIRE']);
   
 class PeerConnections {
+  Object _obj = new Object();
   Map<String, Client> _clients = {};
-  Map<dynamic, int> _ips = {};
+  List<String> _activeClients = [];
     
   PeerConnection() {
     Logger.root.onRecord.listen(new LogPrintHandler());
     log.onRecord.listen(new LogPrintHandler()); 
   }
   
-  void handleConfigRequest(HttpRequest request) {
+  Future handleConfigRequest(HttpRequest request) async {
     setAccessHeaders(request);
     request.response.headers.add('Content-Type', 'application/octet-stream');
     var params = PATTERN.parse(request.uri.path);
@@ -31,17 +34,20 @@ class PeerConnections {
       pad += pad;
     }
     request.response.write(pad + '\n');
-    _clients[id] = new Client(this, ip, id, token, null);
-    // TODO: Send outstanding data.
-    request.response.write("{\"type\":\"OPEN\"}");
-    request.response.close();
+    (lock(_obj, () { addNewClient(id, ip); })).whenComplete(() {
+      // TODO: Send outstanding data.
+      request.response.write("{\"type\":\"OPEN\"}");
+      request.response.close();
+    });
   }
    
-  void registerWebSocket(id, WebSocket webSocket) {
+  Future registerWebSocket(id, WebSocket webSocket) async {
     Client client = _clients[id];
     if (client == null || client.closed) {
       // Client was closed for some reason.
       webSocket.close(1002, "No associated client");
+      log.warning("No client to register websocket with for ${id}! Only ${_clients}");
+      return;
     }
     client.webSocket = webSocket;
     // Listen for incoming data. We expect the data to be a JSON-encoded String.
@@ -49,19 +55,21 @@ class PeerConnections {
       .listen((json) {
         client.handleWebSocketMessage(json);
       }, onError: (error) {
-        print('Bad WebSocket request ${error} ${client.id} closed');
+        log.warning('Bad WebSocket request ${error} ${client.id} closed');
         client.closed = true;
       }, onDone: () {
         log.info("Websocket for ${client.id} closed");
         client.closed = true;  
       });
     // Send list of active peers.
-    Map data = {'type':'ACTIVE_IDS', 'ids':listActiveClientIdsAndPurgeOld()};
-    log.info("Sending current client data ${data}");
-    client.send(JSON.encode(data));
+    lock(_obj, () {listActiveClientIdsAndPurgeOld(); }).then((value) {
+      Map data = {'type':'ACTIVE_IDS', 'ids': _activeClients};
+      log.info("Sending current client data ${data}");
+      client.send(JSON.encode(data));
+    });
   }
 
-  List<String> listActiveClientIdsAndPurgeOld() {
+  Future<List<String>> listActiveClientIdsAndPurgeOld() async {
     List<String> ids = new List();
     Map<String, Client> clients = new Map();
     _clients.forEach((id, Client client) {
@@ -71,7 +79,13 @@ class PeerConnections {
       }
     });
     _clients = clients;
-    return ids;
+    _activeClients = ids;
+  }
+
+
+  Future addNewClient(id, ip) async {
+    _clients[id] = new Client(this, ip, id);
+    log.info("Added client $id $ip as ${_clients[id]}");
   }
 }
 
@@ -81,11 +95,10 @@ class Client {
   DateTime created;
   var ip;
   var id;
-  var token;
-  WebSocket webSocket;
+  WebSocket webSocket = null;
   bool closed = false;
   
-  Client(this.peerConnections, this.ip, this.id, this.token, this.webSocket) {
+  Client(this.peerConnections, this.ip, this.id) {
     created = new DateTime.now();
   }
   
@@ -128,6 +141,8 @@ class Client {
       'dst': id
     };
   }
+
+  toString() => "Client $ip $id";
 }
 
 
