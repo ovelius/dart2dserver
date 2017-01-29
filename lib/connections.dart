@@ -15,8 +15,10 @@ final Set<String> DO_NO_PERSIST = new Set.from(['LEAVE', 'EXPIRE']);
 class PeerConnections {
   Object _obj = new Object();
   Map<String, Client> _clients = {};
-  List<String> _activeClients = [];
-    
+  List<Client> _activeClients = [];
+
+  Map<String, Client> get clients => _clients;
+
   PeerConnection() {
     Logger.root.onRecord.listen(new LogPrintHandler());
     log.onRecord.listen(new LogPrintHandler()); 
@@ -27,14 +29,12 @@ class PeerConnections {
     request.response.headers.add('Content-Type', 'application/octet-stream');
     var params = PATTERN.parse(request.uri.path);
     var id = params[0];
-    var token = params[1];
-    var ip = request.connectionInfo.remoteAddress.address;
     var pad = '00';
     for (var i = 0; i < 10; i++) {
       pad += pad;
     }
     request.response.write(pad + '\n');
-    (lock(_obj, () { addNewClient(id, ip); })).whenComplete(() {
+    (lock(_obj, () => addNewClient(id, request.connectionInfo))).whenComplete(() {
       // TODO: Send outstanding data.
       request.response.write("{\"type\":\"OPEN\"}");
       request.response.close();
@@ -62,44 +62,70 @@ class PeerConnections {
         client.closed = true;  
       });
     // Send list of active peers.
-    lock(_obj, () {listActiveClientIdsAndPurgeOld(); }).then((value) {
-      Map data = {'type':'ACTIVE_IDS', 'ids': _activeClients};
+    lock(_obj, () => listActiveClientIdsAndPurgeOld() ).then((List<Client> active) {
+      List<Client> activeCopy = new List.from(_activeClients);
+      sortByClosestIp(activeCopy, client);
+      List<String> closeActiveIds = activeCopy.map((Client c) => c.id).toList();
+      Map data = {'type':'ACTIVE_IDS', 'ids': closeActiveIds};
       log.info("Sending current client data ${data}");
       client.send(JSON.encode(data));
     });
   }
 
-  Future<List<String>> listActiveClientIdsAndPurgeOld() async {
-    List<String> ids = new List();
+  Future<List<Client>> listActiveClientIdsAndPurgeOld() async {
+    List<Client> ids = new List();
     Map<String, Client> clients = new Map();
     _clients.forEach((id, Client client) {
       if (!client.invalid()) {
         clients[id] = client;
-        ids.add(id);
+        ids.add(client);
       }
     });
     _clients = clients;
     _activeClients = ids;
+    return _activeClients;
   }
 
 
-  Future addNewClient(id, ip) async {
-    _clients[id] = new Client(this, ip, id);
+  Future addNewClient(String id, HttpConnectionInfo connectionInfo) async {
+    String ip = connectionInfo.remoteAddress.address;
+    _clients[id] = new Client(this, ip, id, connectionInfo.remoteAddress.rawAddress);
     log.info("Added client $id $ip as ${_clients[id]}");
+    return _clients[id];
+  }
+
+  /**
+   * Return a list sorted with the closest matching IP to ours first.
+   * This means users on the same private network is more likely to connect to
+   * eachother.
+   */
+  List<Client> sortByClosestIp(List<Client> clients, Client selfClient) {
+    int selfRawIp = selfClient.rawIp;
+    clients.sort((Client a, Client b) {
+      int aDistance = a.rawIp ^ selfRawIp;
+      int bDistance = b.rawIp ^ selfRawIp;
+      return aDistance > bDistance ? 1 : -1;
+    });
+    return clients;
   }
 }
 
+int _toSingleIntRepr(List<int> rawIp) => rawIp[0] << 24 | rawIp[1] << 16 | rawIp[2] << 8 | rawIp[3];
+
 class Client {
-  static final Duration WEB_SOCKET_GRACE_TIME = new Duration(seconds: 30);
+  static Duration WEB_SOCKET_GRACE_TIME = new Duration(seconds: 20);
   PeerConnections peerConnections;
   DateTime created;
-  var ip;
-  var id;
+  String ip;
+  int rawIp;
+  String id;
   WebSocket webSocket = null;
   bool closed = false;
   
-  Client(this.peerConnections, this.ip, this.id) {
+  Client(this.peerConnections, this.ip, this.id, List<int> rawIp) {
     created = new DateTime.now();
+    // We expect only ipv4 addresses right now.
+    this.rawIp = _toSingleIntRepr(rawIp);
   }
   
   /**
@@ -145,47 +171,3 @@ class Client {
   toString() => "Client $ip $id";
 }
 
-
-/*
-  // User is connected!
-  if (destination) {
-    try {
-      util.log(type, 'from', src, 'to', dst);
-      if (destination.socket) {
-        destination.socket.send(data);
-      } else if (destination.res) {
-        data += '\n';
-        destination.res.write(data);
-      } else {
-        // Neither socket no res available. Peer dead?
-        throw "Peer dead";
-      }
-    } catch (e) {
-      // This happens when a peer disconnects without closing connections and
-      // the associated WebSocket has not closed.
-      util.prettyError(e);
-      // Tell other side to stop trying.
-      this._removePeer(key, dst);
-      this._handleTransmission(key, {
-        type: 'LEAVE',
-        src: dst,
-        dst: src
-      });
-    }
-  } else {
-    // Wait for this client to connect/reconnect (XHR) for important
-    // messages.
-    if (type !== 'LEAVE' && type !== 'EXPIRE' && dst) {
-      var self = this;
-      if (!this._outstanding[key][dst]) {
-        this._outstanding[key][dst] = [];
-      }
-      this._outstanding[key][dst].push(message);
-    } else if (type === 'LEAVE' && !dst) {
-      this._removePeer(key, src);
-    } else {
-      // Unavailable destination specified with message LEAVE or EXPIRE
-      // Ignore
-    }
-  }
-}; */

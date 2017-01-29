@@ -10,7 +10,7 @@ import 'package:logging_handlers/logging_handlers_shared.dart';
 
 final Logger log = new Logger('PeerServer');
 
-setAccessHeaders(var request) {
+setAccessHeaders(HttpRequest request) {
   request.response.headers.add('Access-Control-Allow-Origin', '*');
   request.response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE');
   request.response.headers.add('Access-Control-Allow-Headers', 'Content-Type');
@@ -39,7 +39,7 @@ class PeerServer {
     router.serve(PATTERN).listen(peerConnections.handleConfigRequest);
   }
 
-  void responseWithNewId(var request) {
+  void responseWithNewId(HttpRequest request) {
     int a = new Random().nextInt(0xffffffff);
     setAccessHeaders(request);
     String id = "id-${a.toRadixString(16)}";
