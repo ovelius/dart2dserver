@@ -90,8 +90,11 @@ void main() {
     await connections.addNewClient(
         "1111", new FakeHttpConnectionInfo("1.1.1.1"));
     expect(connections.clients.length, equals(3));
+    // No web sockets yet so no active clients.
+    expect(connections.activeClients.length, equals(0));
     await connections.listActiveClientIdsAndPurgeOld();
     expect(connections.clients.length, equals(3));
+    expect(connections.activeClients.length, equals(0));
 
     MockWebSocket socket = new MockWebSocket();
     await connections.registerWebSocket(
@@ -105,9 +108,11 @@ void main() {
       generatedClientId = data['id'];
       expect(data, containsPair("type", "ACTIVE_IDS"));
       expect(data,
-          containsPair("ids", [generatedClientId, '4321', '1111', '1234']));
+          containsPair("ids", [generatedClientId, '1111']));
     });
-    // verify(socket.close(1002, "No associated client"));
+
+    await connections.listActiveClientIdsAndPurgeOld();
+    expect(connections.activeClients.length, equals(1));
 
     MockWebSocket socket1 = new MockWebSocket();
     MockWebSocket socket4 = new MockWebSocket();
@@ -140,5 +145,6 @@ void main() {
     // The old client got purged.
     await connections.listActiveClientIdsAndPurgeOld();
     expect(connections.clients.length, equals(3));
+    expect(connections.activeClients.length, equals(3));
   });
 }

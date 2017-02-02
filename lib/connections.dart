@@ -19,6 +19,7 @@ class PeerConnections {
   List<Client> _activeClients = [];
 
   Map<String, Client> get clients => _clients;
+  List<Client> get activeClients => _activeClients;
 
   PeerConnection() {
     Logger.root.onRecord.listen(new LogPrintHandler());
@@ -47,11 +48,13 @@ class PeerConnections {
     if (client == null) {
       // If no client then register one now!
       int a = new Random().nextInt(0xffffffff);
-      String id = "id-${a.toRadixString(16)}";
+      id = "id-${a.toRadixString(16)}";
+      log.info("No existing client while registring websocket, creating one $id");
       return (lock(_obj, () => addNewClient(id, request.connectionInfo))).then((client) {
          _registerWebSocket(id, webSocket);
       });
     }
+    log.info("Registering websocket for $id");
     return _registerWebSocket(id, webSocket);
   }
 
@@ -93,7 +96,9 @@ class PeerConnections {
     _clients.forEach((id, Client client) {
       if (!client.invalid()) {
         clients[id] = client;
-        ids.add(client);
+        if (client.active()) {
+          ids.add(client);
+        }
       }
     });
     _clients = clients;
@@ -151,6 +156,11 @@ class Client {
     return closed || 
         (webSocket == null && now.millisecondsSinceEpoch - created.millisecondsSinceEpoch > WEB_SOCKET_GRACE_TIME.inMilliseconds);
   }
+
+  /**
+   * If this client has an active websocket.
+   */
+  bool active() => webSocket != null;
   
   void handleWebSocketMessage(json) {
     var type = json['type'];
