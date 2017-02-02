@@ -1,6 +1,7 @@
 import 'package:dart2dserver/connections.dart';
 import 'package:test/test.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'package:mockito/mockito.dart';
 import 'dart:io';
 
@@ -11,7 +12,7 @@ class FakeHttpConnectionInfo extends Mock implements HttpConnectionInfo {
   InternetAddress remoteAddress;
 }
 
-class MockHttpHeaders extends Mock implements HttpHeaders { }
+class MockHttpHeaders extends Mock implements HttpHeaders {}
 
 class MockHttpResponse extends Mock implements HttpResponse {
   MockHttpHeaders headers = new MockHttpHeaders();
@@ -52,7 +53,9 @@ void main() {
   });
   test('TestAddClient', () async {
     FakeHttpConnectionInfo info = new FakeHttpConnectionInfo("1.2.3.4");
-    await connections.addNewClient("1234", info).then(expectAsync1((Client client){
+    await connections
+        .addNewClient("1234", info)
+        .then(expectAsync1((Client client) {
       expect(client.id, equals("1234"));
       expect(client.ip, equals("1.2.3.4"));
       int expectedRawIp = 1 << 24 | 2 << 16 | 3 << 8 | 4;
@@ -70,41 +73,72 @@ void main() {
 
     List<Client> list = [c1, c2, c3, c4, c5, c6];
 
-    expect(connections.sortByClosestIp(list, c1), equals([
-       c1, c2, c6, c5, c3, c4]));
+    expect(connections.sortByClosestIp(list, c1),
+        equals([c1, c2, c6, c5, c3, c4]));
 
-    expect(connections.sortByClosestIp(list, c4), equals([
-      c4, c3, c2, c1, c6, c5]));
+    expect(connections.sortByClosestIp(list, c4),
+        equals([c4, c3, c2, c1, c6, c5]));
   });
   test('TestUpdateActiveClientsAndRegisterSocket', () async {
+    MockHttpRequest request = new MockHttpRequest();
+    request.connectionInfo = new FakeHttpConnectionInfo("5.5.4.2");
     Client.WEB_SOCKET_GRACE_TIME = new Duration(milliseconds: 25);
-    await connections.addNewClient("1234", new FakeHttpConnectionInfo("1.2.3.4"));
-    await connections.addNewClient("4321", new FakeHttpConnectionInfo("4.3.2.1"));
-    await connections.addNewClient("1111", new FakeHttpConnectionInfo("1.1.1.1"));
+    await connections.addNewClient(
+        "1234", new FakeHttpConnectionInfo("1.2.3.4"));
+    await connections.addNewClient(
+        "4321", new FakeHttpConnectionInfo("4.3.2.1"));
+    await connections.addNewClient(
+        "1111", new FakeHttpConnectionInfo("1.1.1.1"));
     expect(connections.clients.length, equals(3));
     await connections.listActiveClientIdsAndPurgeOld();
     expect(connections.clients.length, equals(3));
 
     MockWebSocket socket = new MockWebSocket();
-    await connections.registerWebSocket("missing", socket);
-    verify(socket.close(1002, "No associated client"));
+    await connections.registerWebSocket(
+        "no-client-succeeeds-anyway", socket, request);
+    String generatedClientId;
+    when(socket.add(any)).thenAnswer((Invocation i) {
+      String json = i.positionalArguments[0];
+      Map data = JSON.decode(json);
+      // We got a new id!
+      expect(data, contains("id"));
+      generatedClientId = data['id'];
+      expect(data, containsPair("type", "ACTIVE_IDS"));
+      expect(data,
+          containsPair("ids", [generatedClientId, '4321', '1111', '1234']));
+    });
+    // verify(socket.close(1002, "No associated client"));
 
     MockWebSocket socket1 = new MockWebSocket();
     MockWebSocket socket4 = new MockWebSocket();
     when(socket1.add(any)).thenAnswer((Invocation i) {
-      String data = i.positionalArguments[0];
-      expect(data, equals("{\"type\":\"ACTIVE_IDS\",\"ids\":[\"1111\",\"4321\"]}"));
+      String json = i.positionalArguments[0];
+      Map data = JSON.decode(json);
+      expect(
+          data,
+          equals({
+            "type": "ACTIVE_IDS",
+            "ids": ["1111", generatedClientId, "4321"],
+            "id": "1111"
+          }));
     });
     when(socket4.add(any)).thenAnswer((Invocation i) {
-      String data = i.positionalArguments[0];
-      expect(data, equals("{\"type\":\"ACTIVE_IDS\",\"ids\":[\"4321\",\"1111\"]}"));
+      String json = i.positionalArguments[0];
+      Map data = JSON.decode(json);
+      expect(
+          data,
+          equals({
+            "type": "ACTIVE_IDS",
+            "ids": ["4321", generatedClientId, "1111"],
+            "id": "4321"
+          }));
     });
-    await connections.registerWebSocket("1111", socket1);
-    await connections.registerWebSocket("4321", socket4);
+    await connections.registerWebSocket("1111", socket1, request);
+    await connections.registerWebSocket("4321", socket4, request);
     sleep(new Duration(milliseconds: 50));
 
-    // The client with missing socket got purged. OOps.
+    // The old client got purged.
     await connections.listActiveClientIdsAndPurgeOld();
-    expect(connections.clients.length, equals(2));
+    expect(connections.clients.length, equals(3));
   });
 }

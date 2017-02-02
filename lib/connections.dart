@@ -4,6 +4,7 @@ import 'dart:async';
 import 'peers.dart';
 import 'package:route/server.dart';
 import 'dart:io';
+import 'dart:math';
 import 'package:locking/locking.dart';
 import 'dart:convert';
 import 'package:logging/logging.dart';
@@ -41,7 +42,20 @@ class PeerConnections {
     });
   }
    
-  Future registerWebSocket(id, WebSocket webSocket) async {
+  Future registerWebSocket(id, WebSocket webSocket, HttpRequest request) async {
+    Client client = _clients[id];
+    if (client == null) {
+      // If no client then register one now!
+      int a = new Random().nextInt(0xffffffff);
+      String id = "id-${a.toRadixString(16)}";
+      return (lock(_obj, () => addNewClient(id, request.connectionInfo))).then((client) {
+         _registerWebSocket(id, webSocket);
+      });
+    }
+    return _registerWebSocket(id, webSocket);
+  }
+
+  Future _registerWebSocket(id, WebSocket webSocket) async {
     Client client = _clients[id];
     if (client == null || client.closed) {
       // Client was closed for some reason.
@@ -52,21 +66,22 @@ class PeerConnections {
     client.webSocket = webSocket;
     // Listen for incoming data. We expect the data to be a JSON-encoded String.
     webSocket.map((string)=> JSON.decode(string))
-      .listen((json) {
-        client.handleWebSocketMessage(json);
-      }, onError: (error) {
-        log.warning('Bad WebSocket request ${error} ${client.id} closed');
-        client.closed = true;
-      }, onDone: () {
-        log.info("Websocket for ${client.id} closed");
-        client.closed = true;  
-      });
+        .listen((json) {
+      client.handleWebSocketMessage(json);
+    }, onError: (error) {
+      log.warning('Bad WebSocket request ${error} ${client.id} closed');
+      client.closed = true;
+    }, onDone: () {
+      log.info("Websocket for ${client.id} closed");
+      client.closed = true;
+    });
     // Send list of active peers.
     lock(_obj, () => listActiveClientIdsAndPurgeOld() ).then((List<Client> active) {
       List<Client> activeCopy = new List.from(_activeClients);
       sortByClosestIp(activeCopy, client);
       List<String> closeActiveIds = activeCopy.map((Client c) => c.id).toList();
-      Map data = {'type':'ACTIVE_IDS', 'ids': closeActiveIds};
+      // Also send he self id here.
+      Map data = {'type':'ACTIVE_IDS', 'ids': closeActiveIds, 'id': id};
       log.info("Sending current client data ${data}");
       client.send(JSON.encode(data));
     });

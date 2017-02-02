@@ -32,8 +32,8 @@ class PeerServer {
            if (WebSocketTransformer.isUpgradeRequest(request)) {
              var id = request.uri.queryParameters['id'];
              WebSocketTransformer.upgrade(request).then((WebSocket socket) {
-                 peerConnections.registerWebSocket(id, socket);
-             }); 
+                 peerConnections.registerWebSocket(id, socket, request);
+             });
            }
         });
     router.serve(PATTERN).listen(peerConnections.handleConfigRequest);
