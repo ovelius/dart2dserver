@@ -138,7 +138,10 @@ void main() {
             "id": "4321"
           }));
     });
+    // Close one of them.
+    connections.clients["1111"].closed = true;
     await connections.registerWebSocket("1111", socket1, request);
+    expect(connections.clients["1111"].closed, isFalse);
     await connections.registerWebSocket("4321", socket4, request);
     sleep(new Duration(milliseconds: 50));
 

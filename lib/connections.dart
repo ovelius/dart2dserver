@@ -44,12 +44,14 @@ class PeerConnections {
   }
    
   Future registerWebSocket(id, WebSocket webSocket, HttpRequest request) async {
-    Client client = _clients[id];
-    if (client == null) {
+    if (id == null || !clients.containsKey(id)) {
       // If no client then register one now!
       int a = new Random().nextInt(0xffffffff);
-      id = "id-${a.toRadixString(16)}";
-      log.info("No existing client while registring websocket, creating one $id");
+      if (id == null) {
+        id = "id-${a.toRadixString(16)}";
+        log.info(
+            "Creating new id $id for socket to ${request.connectionInfo.remoteAddress.address}");
+      }
       return (lock(_obj, () => addNewClient(id, request.connectionInfo))).then((client) {
          _registerWebSocket(id, webSocket);
       });
@@ -60,13 +62,17 @@ class PeerConnections {
 
   Future _registerWebSocket(id, WebSocket webSocket) async {
     Client client = _clients[id];
-    if (client == null || client.closed) {
+    if (client == null) {
       // Client was closed for some reason.
       webSocket.close(1002, "No associated client");
       log.warning("No client to register websocket with for ${id}! Only ${_clients}");
       return;
     }
     client.webSocket = webSocket;
+    if (client.closed) {
+      log.info("Reopening previously closed socket for $id");
+      client.closed = false;
+    }
     // Listen for incoming data. We expect the data to be a JSON-encoded String.
     webSocket.map((string)=> JSON.decode(string))
         .listen((json) {
