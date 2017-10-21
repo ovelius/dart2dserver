@@ -2,7 +2,6 @@ library connections;
 
 import 'dart:async';
 import 'peers.dart';
-import 'package:route/server.dart';
 import 'dart:io';
 import 'dart:math';
 import 'package:locking/locking.dart';
@@ -11,7 +10,6 @@ import 'package:logging/logging.dart';
 import 'package:logging_handlers/logging_handlers_shared.dart';
 
 final Logger log = new Logger('Connections');
-final Set<String> DO_NO_PERSIST = new Set.from(['LEAVE', 'EXPIRE']);
   
 class PeerConnections {
   Object _obj = new Object();
@@ -31,11 +29,6 @@ class PeerConnections {
     request.response.headers.add('Content-Type', 'application/octet-stream');
     var params = PATTERN.parse(request.uri.path);
     var id = params[0];
-    var pad = '00';
-    for (var i = 0; i < 10; i++) {
-      pad += pad;
-    }
-    request.response.write(pad + '\n');
     (lock(_obj, () => addNewClient(id, request.connectionInfo))).whenComplete(() {
       // TODO: Send outstanding data.
       request.response.write("{\"type\":\"OPEN\"}");
@@ -53,7 +46,7 @@ class PeerConnections {
             "Creating new id $id for socket to ${request.connectionInfo.remoteAddress.address}");
       }
       return (lock(_obj, () => addNewClient(id, request.connectionInfo))).then((client) {
-         _registerWebSocket(id, webSocket);
+         return _registerWebSocket(id, webSocket);
       });
     }
     log.info("Registering websocket for $id");
@@ -66,7 +59,7 @@ class PeerConnections {
       // Client was closed for some reason.
       webSocket.close(1002, "No associated client");
       log.warning("No client to register websocket with for ${id}! Only ${_clients}");
-      return;
+      return new Future.value();
     }
     client.webSocket = webSocket;
     if (client.closed) {
@@ -85,7 +78,7 @@ class PeerConnections {
       client.closed = true;
     });
     // Send list of active peers.
-    lock(_obj, () => listActiveClientIdsAndPurgeOld() ).then((List<Client> active) {
+    return lock(_obj, () => listActiveClientIdsAndPurgeOld() ).then((List<Client> active) {
       List<Client> activeCopy = new List.from(_activeClients);
       sortByClosestIp(activeCopy, client);
       List<String> closeActiveIds = activeCopy.map((Client c) => c.id).toList();
@@ -100,11 +93,14 @@ class PeerConnections {
     List<Client> ids = new List();
     Map<String, Client> clients = new Map();
     _clients.forEach((id, Client client) {
-      if (!client.invalid()) {
+      ClientState invalidReason = client.validState();
+      if (invalidReason == ClientState.VALID) {
         clients[id] = client;
         if (client.active()) {
           ids.add(client);
         }
+      } else {
+        log.fine("Dropping invalid client ${client} reason: ${invalidReason}");
       }
     });
     _clients = clients;
@@ -138,8 +134,16 @@ class PeerConnections {
 
 int _toSingleIntRepr(List<int> rawIp) => rawIp[0] << 24 | rawIp[1] << 16 | rawIp[2] << 8 | rawIp[3];
 
+enum ClientState {
+  VALID,
+  CLOSED,
+  SOCKET_CREATE_TIMEOUT,
+  UNRESPONSIVE,
+}
+
 class Client {
   static Duration WEB_SOCKET_GRACE_TIME = new Duration(seconds: 20);
+  static Duration UNRESPONSIVE_TIMEOUT = new Duration(seconds: 40);
   PeerConnections peerConnections;
   DateTime created;
   String ip;
@@ -147,9 +151,13 @@ class Client {
   String id;
   WebSocket webSocket = null;
   bool closed = false;
+  DateTime lastClientActivity;
+  DateTime lastReceivedData;
   
   Client(this.peerConnections, this.ip, this.id, List<int> rawIp) {
     created = new DateTime.now();
+    lastClientActivity = created;
+    lastReceivedData = created;
     // We expect only ipv4 addresses right now.
     this.rawIp = _toSingleIntRepr(rawIp);
   }
@@ -157,27 +165,56 @@ class Client {
   /**
    * Client will be invalid if closed or a websocket has not been opened within WEB_SOCKET_GRACE_TIME.
    */
-  bool invalid() {
+  ClientState validState() {
+    if (closed) {
+      return ClientState.CLOSED;
+    }
     DateTime now = new DateTime.now();
-    return closed || 
-        (webSocket == null && now.millisecondsSinceEpoch - created.millisecondsSinceEpoch > WEB_SOCKET_GRACE_TIME.inMilliseconds);
+    if (webSocket == null) {
+      if (now.millisecondsSinceEpoch - created.millisecondsSinceEpoch >
+          WEB_SOCKET_GRACE_TIME.inMilliseconds) {
+        return ClientState.SOCKET_CREATE_TIMEOUT;
+      }
+    } else {
+      if (sinceLastResponse() > UNRESPONSIVE_TIMEOUT) {
+        return ClientState.UNRESPONSIVE;
+      }
+    }
+    return ClientState.VALID;
+  }
+
+  Duration sinceLastResponse() {
+    Duration responseTime = lastReceivedData.difference(lastClientActivity);
+    if (responseTime.isNegative) {
+      return Duration.ZERO;
+    }
+    return responseTime;
   }
 
   /**
    * If this client has an active websocket.
    */
   bool active() => webSocket != null;
+
+  void close() {
+    closed = true;
+    if (webSocket != null) {
+      webSocket.close();
+    }
+  }
   
-  void handleWebSocketMessage(json) {
-    var type = json['type'];
-    var dst = json['dst'];
+  void handleWebSocketMessage(Map json) {
+    String dst = json['dst'];
     json['src'] = id;
-    var data = JSON.encode(json);
+    String data = JSON.encode(json);
+    lastClientActivity = new DateTime.now();
     
     Client destination = peerConnections._clients[dst];
     if (destination != null) {
       log.info("$id -> $dst: $data");
-      destination.send(JSON.encode(json));
+      // Mark client as having recieved data.
+      destination.lastReceivedData = lastClientActivity;
+      destination.send(data);
     } else {
       send(JSON.encode(leaveMessage(dst)));
     }

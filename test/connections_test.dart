@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:mockito/mockito.dart';
 import 'dart:io';
+import 'package:logging/logging.dart' show Logger, Level, LogRecord;
 
 class FakeHttpConnectionInfo extends Mock implements HttpConnectionInfo {
   FakeHttpConnectionInfo(String ip) {
@@ -22,8 +23,14 @@ class MockHttpResponse extends Mock implements HttpResponse {
 }
 
 class MockWebSocket extends Mock implements WebSocket {
+  List<Map> sentData = [];
+
   Stream/*<S>*/ map/*<S>*/(/*=S*/ convert(event)) {
     return this;
+  }
+
+  void add(String data) {
+    sentData.add(JSON.decode(data));
   }
 }
 
@@ -33,11 +40,20 @@ class MockHttpRequest extends Mock implements HttpRequest {
   FakeHttpConnectionInfo connectionInfo = new FakeHttpConnectionInfo("1.2.3.4");
 }
 
+logOutputForTest() {
+  Logger.root.level = Level.ALL;
+  Logger.root.onRecord.listen((LogRecord rec) {
+    String msg = '${rec.loggerName}: ${rec.level.name}: ${rec.time}: ${rec.message}';
+    print(msg);
+  });
+}
+
 void main() {
   PeerConnections connections;
 
   setUp(() {
     connections = new PeerConnections();
+    logOutputForTest();
   });
 
   Client clientForTest(String ip) {
@@ -82,7 +98,7 @@ void main() {
   test('TestUpdateActiveClientsAndRegisterSocket', () async {
     MockHttpRequest request = new MockHttpRequest();
     request.connectionInfo = new FakeHttpConnectionInfo("5.5.4.2");
-    Client.WEB_SOCKET_GRACE_TIME = new Duration(milliseconds: 25);
+    Client.WEB_SOCKET_GRACE_TIME = new Duration(milliseconds: 80);
     await connections.addNewClient(
         "1234", new FakeHttpConnectionInfo("1.2.3.4"));
     await connections.addNewClient(
@@ -99,55 +115,79 @@ void main() {
     MockWebSocket socket = new MockWebSocket();
     await connections.registerWebSocket(
         "no-client-succeeeds-anyway", socket, request);
-    String generatedClientId;
-    when(socket.add(any)).thenAnswer((Invocation i) {
-      String json = i.positionalArguments[0];
-      Map data = JSON.decode(json);
-      // We got a new id!
-      expect(data, contains("id"));
-      generatedClientId = data['id'];
-      expect(data, containsPair("type", "ACTIVE_IDS"));
-      expect(data,
-          containsPair("ids", [generatedClientId, '1111']));
-    });
+
+    expect(socket.sentData, hasLength(1));
+    Map data = socket.sentData[0];
+    expect(data, equals({
+      'type': 'ACTIVE_IDS',
+      'ids': ['no-client-succeeeds-anyway'],
+      'id': 'no-client-succeeeds-anyway'
+    }));
 
     await connections.listActiveClientIdsAndPurgeOld();
     expect(connections.activeClients.length, equals(1));
 
     MockWebSocket socket1 = new MockWebSocket();
     MockWebSocket socket4 = new MockWebSocket();
-    when(socket1.add(any)).thenAnswer((Invocation i) {
-      String json = i.positionalArguments[0];
-      Map data = JSON.decode(json);
-      expect(
-          data,
-          equals({
-            "type": "ACTIVE_IDS",
-            "ids": ["1111", generatedClientId, "4321"],
-            "id": "1111"
-          }));
-    });
-    when(socket4.add(any)).thenAnswer((Invocation i) {
-      String json = i.positionalArguments[0];
-      Map data = JSON.decode(json);
-      expect(
-          data,
-          equals({
-            "type": "ACTIVE_IDS",
-            "ids": ["4321", generatedClientId, "1111"],
-            "id": "4321"
-          }));
-    });
     // Close one of them.
     connections.clients["1111"].closed = true;
     await connections.registerWebSocket("1111", socket1, request);
     expect(connections.clients["1111"].closed, isFalse);
-    await connections.registerWebSocket("4321", socket4, request);
-    sleep(new Duration(milliseconds: 50));
 
+    expect(socket1.sentData, hasLength(1));
+    expect(socket1.sentData[0], equals({
+      'type': 'ACTIVE_IDS',
+      'ids': ['1111', 'no-client-succeeeds-anyway'],
+      'id': '1111'
+    }));
+
+    await connections.registerWebSocket("4321", socket4, request);
+
+    expect(socket4.sentData, hasLength(1));
+    expect(socket4.sentData[0], equals({
+      'type': 'ACTIVE_IDS',
+      'ids': ['4321', 'no-client-succeeeds-anyway', '1111'],
+      'id': '4321'
+    }));
+
+    sleep(new Duration(milliseconds: 70));
     // The old client got purged.
+    expect(connections.clients.length, equals(4));
     await connections.listActiveClientIdsAndPurgeOld();
     expect(connections.clients.length, equals(3));
     expect(connections.activeClients.length, equals(3));
+  });
+
+  test('TestUnresponsiveClient', () async {
+    Client.UNRESPONSIVE_TIMEOUT = new Duration(milliseconds: 60);
+    await connections.addNewClient(
+      "1234", new FakeHttpConnectionInfo("1.2.3.4"));
+    await connections.addNewClient(
+      "4321", new FakeHttpConnectionInfo("4.3.2.1"));
+
+    MockWebSocket socket1 = new MockWebSocket();
+    MockWebSocket socket2 = new MockWebSocket();
+
+    await connections.registerWebSocket("1234", socket1, new MockHttpRequest());
+    await connections.registerWebSocket("4321", socket2, new MockHttpRequest());
+
+    expect(connections.clients["1234"].active(), isTrue);
+    expect(connections.clients["4321"].active(), isTrue);
+
+    connections.clients["1234"].handleWebSocketMessage({"type": "test", "dst":"4321"});
+    expect(socket2.sentData, hasLength(2));
+    sleep(new Duration(milliseconds: 50));
+
+    connections.clients["1234"].handleWebSocketMessage({"type": "respond please!", "dst":"4321"});
+    expect(socket2.sentData, hasLength(3));
+
+    expect(connections.clients["4321"].sinceLastResponse().inMilliseconds, greaterThan(30));
+
+    sleep(new Duration(milliseconds: 50));
+
+    connections.clients["1234"].handleWebSocketMessage({"type": "goodbye :(", "dst":"4321"});
+    expect(socket2.sentData, hasLength(4));
+
+    expect(connections.clients["4321"].validState(), equals(ClientState.UNRESPONSIVE));
   });
 }
